@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Live ASCII Text — Rice Table Mode</title>
+  <style>
+    :root{--bg:#0f0f10;--fg:#e5e7eb;--panel:#151517;--panelBorder:#2a2a2e}
+    html,body{height:100%;margin:0}
+    body{background:var(--bg);color:var(--fg);font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;overflow:hidden;user-select:none}
+
+    /* ASCII Bühne (wird für Sampling genutzt, ist aber im Table-Mode ausgeblendet) */
+    pre#ascii{position:fixed;inset:0;margin:0;white-space:pre;text-align:center;line-height:1;font-family:inherit;font-variant-ligatures:none;letter-spacing:0}
+
+    /* Unsichtbares Vollbild-Eingabefeld (für Tastatur) */
+    .ghost-input{position:fixed;inset:0;opacity:0;border:0;outline:0}
+
+    /* Physics-Canvas (zeigt die beweglichen ASCII-Zeichen) */
+    canvas#anim{position:fixed;inset:0;display:block}
+
+    /* Legende unten links */
+    .legend{position:fixed;left:12px;bottom:10px;font-size:12px;opacity:.9;color:#9ca3af;line-height:1.35}
+
+    /* Controls (Friction) oben rechts */
+    .controls{position:fixed;right:12px;top:12px;z-index:20;display:flex;gap:.6rem;align-items:center;background:var(--panel);border:1px solid var(--panelBorder);border-radius:10px;padding:8px 10px;box-shadow:0 6px 20px rgba(0,0,0,.25)}
+    .controls label{font-size:12px;color:#a1a1aa}
+    .controls output{min-width:74px;text-align:right;display:inline-block;font-size:12px;color:#e5e7eb}
+    .controls input[type="range"]{width:200px}
+  </style>
+</head>
+<body>
+  <input id="hidden" class="ghost-input" autocomplete="off" spellcheck="false" maxlength="20" />
+  <pre id="ascii" style="display:none"></pre>
+  <div id="legend" class="legend">Type something!<br>Enter: Delete Text<br>Drag with mouse: move letters</div>
+  <div id="controls" class="controls">
+    <label>Friction</label>
+    <input id="fSlider" type="range" min="0.90" max="0.999" step="0.001" value="0.970" />
+    <output id="fLabel">0.970</output>
+  </div>
+  <canvas id="anim"></canvas>
+  <canvas id="work" style="display:none"></canvas>
+
+  <script>
+    const hidden = document.getElementById('hidden');
+    const ascii  = document.getElementById('ascii');
+    const work   = document.getElementById('work');
+    const anim   = document.getElementById('anim');
+    const legend = document.getElementById('legend');
+    const controls= document.getElementById('controls');
+    const fSlider = document.getElementById('fSlider');
+    const fLabel  = document.getElementById('fLabel');
+    const ctx    = work.getContext('2d');
+    const actx   = anim.getContext('2d');
+
+    // Zeichen von hell -> dunkel
+    const CHARSET = " .'`^:,;Il!i><~+_-?][}{1)(|\\/tfjrxnuvczXYUJCLQ0OZmwqpdbkhao*#MW&8%B@$";
+    const MAX_LEN = 20;
+
+    // Zufällige, aber stabile (pro Zeichen) Grauverläufe
+    function hashCode(str){ let h = 2166136261 >>> 0; for(let i=0;i<str.length;i++){ h ^= str.charCodeAt(i); h = Math.imul(h, 16777619);} return h >>> 0; }
+    function xorshift32(seed){ let s = (seed|0) || 1; return function(){ s ^= s<<13; s ^= s>>>17; s ^= s<<5; return ((s>>>0)/4294967296);} }
+    function makeGrayGrad(ctx, cx, cy, w, h, rnd){
+      const angle = rnd()*Math.PI*2; const r = Math.max(w,h)*0.75; const x0=cx-Math.cos(angle)*r, y0=cy-Math.sin(angle)*r; const x1=cx+Math.cos(angle)*r, y1=cy+Math.sin(angle)*r;
+      const gA=60+Math.floor(rnd()*180), gB=60+Math.floor(rnd()*180); const grad=ctx.createLinearGradient(x0,y0,x1,y1);
+      grad.addColorStop(0,`rgb(${gA},${gA},${gA})`); if(Math.random()>0.5){ const pos=0.2+rnd()*0.6; const gM=60+Math.floor(rnd()*180); grad.addColorStop(pos,`rgb(${gM},${gM},${gM})`);} grad.addColorStop(1,`rgb(${gB},${gB},${gB})`); return grad; }
+
+    // Zustände
+    let lastGrid = [];                 // {ci, ri, ch, color, cidx}
+    let cellSize = 8;
+    let gridCols = 0, gridRows = 0;    // Spalten/Zeilen des ASCII-Layouts
+
+    // "Rice on table" Physik
+    let parts = [];                    // bewegliche Zeichenpartikel
+    let simRunning = false;            // Dauer-Loop
+
+    // Maus / Drag
+    const mouse = { x:0, y:0, r:32, active:false };
+    let dragId = -1;                   // Index des gezogenen Partikels
+    let dragging = false;
+
+    // Reibung (0.90 – 0.999)
+    let friction = parseFloat(fSlider.value);
+    function updateFriction(){ friction = parseFloat(fSlider.value); fLabel.textContent = friction.toFixed(3); }
+    fSlider.addEventListener('input', updateFriction); fSlider.addEventListener('change', updateFriction);
+
+    // Events
+    window.addEventListener('pointermove', (e)=>{ mouse.x=e.clientX; mouse.y=e.clientY; mouse.active=true; });
+    window.addEventListener('pointerleave', ()=>{ mouse.active=false; dragging=false; dragId=-1; });
+    controls.addEventListener('pointerdown', ev=>ev.stopPropagation());
+
+    window.addEventListener('pointerdown', (e)=>{
+      mouse.x=e.clientX; mouse.y=e.clientY; mouse.active=true;
+      // Nächstes Partikel greifen
+      const id = findNearest(mouse.x, mouse.y, cellSize*1.2);
+      if(id>=0){ dragId=id; dragging=true; parts[id].grabbed=true; }
+    });
+    window.addEventListener('pointerup', ()=>{ dragging=false; if(dragId>=0){ parts[dragId].grabbed=false; } dragId=-1; });
+
+    function computeCellSize(W){
+      const targetCols = Math.max(80, Math.min(220, Math.round(W/8)));
+      return Math.max(4, Math.floor(W/targetCols));
+    }
+
+    function renderASCII(text){
+      const W = work.width  = Math.round(window.innerWidth);
+      const H = work.height = Math.round(window.innerHeight);
+
+      // Hintergrund
+      ctx.clearRect(0,0,W,H);
+      ctx.fillStyle = '#000';
+      ctx.fillRect(0,0,W,H);
+
+      const safe = (text||'').slice(0, MAX_LEN).replace(/\n/g,' ');
+      if (text && text.length > MAX_LEN) hidden.value = safe;
+      const len = safe.length || 1;
+
+      // Großes Wort (sehr fett)
+      const base0 = Math.min(W, H) * 0.6;
+      ctx.textBaseline = 'middle';
+      ctx.textAlign = 'center';
+      ctx.font = `900 ${base0}px Impact, 'Arial Black', system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif`;
+      const em0 = ctx.measureText('M').width || (base0*0.6);
+      const scaleW = Math.min(1, (W*0.9) / (em0 * len));
+      const base  = Math.max(16, base0 * scaleW);
+      ctx.font = `900 ${base}px Impact, 'Arial Black', system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif`;
+      const em = ctx.measureText('M').width || (base*0.6);
+
+      for(let i=0;i<len;i++){
+        const ch = safe[i] || '';
+        const x = (W/2) - (em*((len-1)/2 - i));
+        const key = ch + '#' + i;
+        const rnd = xorshift32(hashCode(key));
+        const wch = ctx.measureText(ch).width || em;
+        ctx.fillStyle = makeGrayGrad(ctx, x, H/2, wch, base, rnd);
+        ctx.fillText(ch, x, H/2);
+        ctx.fillText(ch, x+1, H/2);
+        ctx.fillText(ch, x-1, H/2);
+        ctx.fillText(ch, x, H/2+1);
+        ctx.fillText(ch, x, H/2-1);
+      }
+
+      // ASCII-Sampling
+      cellSize = computeCellSize(W);
+      ascii.style.fontSize  = cellSize + 'px';
+      ascii.style.lineHeight= cellSize + 'px';
+
+      const data = ctx.getImageData(0,0,W,H).data;
+      lastGrid = [];
+      gridCols = Math.floor(W / cellSize);
+      gridRows = Math.floor(H / cellSize);
+
+      let out='';
+      for(let y=0;y<gridRows;y++){
+        for(let x=0;x<gridCols;x++){
+          const px = x*cellSize;
+          const py = y*cellSize;
+          const idx=(py*W + px)*4;
+          const r=data[idx], g=data[idx+1], b=data[idx+2];
+          const lum = (0.2126*r + 0.7152*g + 0.0722*b);
+          const cidx = Math.floor((lum/255)*(CHARSET.length-1));
+          const ch = CHARSET[cidx];
+          out += `<span style=\"color:rgb(${r},${g},${b})\">${ch}</span>`;
+          lastGrid.push({ci:x, ri:y, ch, color:`rgb(${r},${g},${b})`, cidx});
+        }
+        out += "\n";
+      }
+      ascii.innerHTML = out;
+    }
+
+    function update(){ renderASCII(hidden.value); buildPartsFromGrid(); }
+
+    // Eingabe: nur Enter löscht, kein ArrowDown mehr
+    hidden.addEventListener('keydown', (e)=>{
+      if(e.key==='Enter') { e.preventDefault(); hidden.value=''; update(); }
+    });
+    hidden.addEventListener('input', ()=>{ buildPartsFromGrid(); });
+
+    // Immer fokussiert bleiben
+    const refocus=()=> hidden.focus();
+    window.addEventListener('load', ()=>{ refocus(); renderASCII(''); buildPartsFromGrid(); startSim(); });
+    window.addEventListener('click', refocus);
+    window.addEventListener('resize', ()=>{ renderASCII(hidden.value); buildPartsFromGrid(true); });
+
+    // --- Partikel aus Raster (nur „sichtbare“ Zeichen, nicht der Hintergrund) ---
+    function buildPartsFromGrid(keepVel=false){
+      // Canvas vorbereiten
+      anim.width  = window.innerWidth;
+      anim.height = window.innerHeight;
+      actx.font = `${cellSize}px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace`;
+      actx.textAlign = 'center';
+      actx.textBaseline = 'middle';
+      const charW = actx.measureText('M').width;
+      const charH = cellSize;
+      const left  = (anim.width  - gridCols*charW) / 2;
+      const top   = (anim.height - gridRows*charH) / 2;
+
+      const prev = parts;
+      const map = new Map(); // key: ci,ri -> index im prev
+      prev.forEach((p,i)=> map.set(p.ci+","+p.ri, i));
+
+      // cidx>1 filtert sehr helle Zeichen ("Hintergrund") weg → performanter
+      const newParts = [];
+      for(const cell of lastGrid){
+        if(cell.cidx <= 1) continue;
+        const key = cell.ci+","+cell.ri;
+        const nx = left + (cell.ci + 0.5)*charW;
+        const ny = top  + (cell.ri + 0.5)*charH;
+        if(keepVel && map.has(key)){
+          const p = prev[map.get(key)];
+          newParts.push({ ...p, x:nx, y:ny, ci:cell.ci, ri:cell.ri, ch:cell.ch, color:cell.color });
+        } else {
+          newParts.push({ x:nx, y:ny, vx:0, vy:0, ci:cell.ci, ri:cell.ri, ch:cell.ch, color:cell.color, grabbed:false });
+        }
+      }
+      parts = newParts;
+    }
+
+    function findNearest(x,y,rad){
+      let best=-1, bd=rad*rad;
+      for(let i=0;i<parts.length;i++){
+        const p=parts[i]; const dx=p.x-x, dy=p.y-y; const d=dx*dx+dy*dy;
+        if(d<bd){ bd=d; best=i; }
+      }
+      return best;
+    }
+
+    function startSim(){ if(simRunning) return; simRunning=true; requestAnimationFrame(loop); }
+
+    function loop(){
+      const now = performance.now();
+      if(!loop.last) loop.last = now;
+      let dt = (now - loop.last) / 1000; if(dt>0.033) dt=0.033; loop.last = now;
+
+      actx.clearRect(0,0,anim.width,anim.height);
+
+      // Physik: Reibung wie auf Tisch; kein globales g
+      for(let i=0;i<parts.length;i++){
+        const p = parts[i];
+
+        // Drag per Maus (Feder zum Cursor)
+        if(dragging && i===dragId){
+          const k = 35; // Federkonstante
+          const dx = mouse.x - p.x; const dy = mouse.y - p.y;
+          p.vx += k*dx*dt; p.vy += k*dy*dt;
+        } else if(mouse.active){
+          // Weicher Kreis-Collider als Schieber
+          const dx = p.x - mouse.x; const dy = p.y - mouse.y; const dist = Math.hypot(dx,dy);
+          const R = mouse.r; if(dist < R && dist>0){
+            const push = (1 - dist/R) * 800; // Schubstärke
+            p.vx += (dx/dist) * push * dt;
+            p.vy += (dy/dist) * push * dt;
+          }
+        }
+
+        // Reibung/Dämpfung
+        p.vx *= friction; p.vy *= friction;
+
+        // Update Position
+        p.x += p.vx*dt; p.y += p.vy*dt;
+
+        // Ränder (Tischkanten) mit leichtem Bounce
+        const pad = cellSize*0.5;
+        if(p.x < pad){ p.x = pad; p.vx = -p.vx*0.2; }
+        if(p.x > anim.width - pad){ p.x = anim.width - pad; p.vx = -p.vx*0.2; }
+        if(p.y < pad){ p.y = pad; p.vy = -p.vy*0.2; }
+        if(p.y > anim.height - pad){ p.y = anim.height - pad; p.vy = -p.vy*0.2; }
+
+        // Render
+        actx.fillStyle = p.color;
+        actx.fillText(p.ch, p.x, p.y);
+      }
+
+      requestAnimationFrame(loop);
+    }
+
+    function renderAndReset(){ renderASCII(hidden.value); buildPartsFromGrid(); }
+
+    function init(){
+      renderAndReset(); startSim(); refocus();
+    }
+    init();
+  </script>
+</body>
+</html>
