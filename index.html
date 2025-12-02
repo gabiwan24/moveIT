@@ -3,35 +3,112 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Live ASCII Text — Optimized</title>
+  <title>Live ASCII Text — Directed River Flow</title>
   <style>
-    :root{--bg:#0f0f10;--fg:#e5e7eb;--panel:#151517;--panelBorder:#2a2a2e}
+    :root{--bg:#0f0f10;--fg:#e5e7eb;--panel:#151517;--panelBorder:#2a2a2e;--accent:#3b82f6}
     html,body{height:100%;margin:0;background:var(--bg);color:var(--fg);font-family:monospace;overflow:hidden;user-select:none}
     .ghost-input{position:fixed;inset:0;opacity:0;cursor:default}
     canvas{position:fixed;inset:0;display:block}
     .legend{position:fixed;left:12px;bottom:10px;font-size:12px;opacity:.7;color:#9ca3af;pointer-events:none}
-    .controls{position:fixed;right:12px;top:12px;z-index:20;display:flex;gap:.6rem;align-items:center;background:var(--panel);border:1px solid var(--panelBorder);border-radius:6px;padding:6px 10px;font-size:12px}
+    
+    /* Controls Container */
+    .controls{
+      position:fixed; right:12px; top:12px; z-index:20;
+      display:flex; flex-direction:column; gap:12px;
+      background:var(--panel); border:1px solid var(--panelBorder);
+      border-radius:6px; padding:12px; font-size:12px;
+      min-width: 180px;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+    }
+    
+    .row { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+    
+    label { color: #a1a1aa; }
+    input[type="range"] { width: 100px; cursor: pointer; }
+
+    /* Button Styling */
+    button#windBtn {
+      width: 100%;
+      background: var(--panelBorder);
+      color: #fff;
+      border: 1px solid #444;
+      padding: 8px;
+      border-radius: 4px;
+      cursor: pointer;
+      font-family: inherit;
+      font-weight: bold;
+      transition: all 0.1s;
+    }
+    button#windBtn:active {
+      background: var(--accent);
+      transform: translateY(1px);
+    }
+    button#windBtn:hover {
+      border-color: var(--accent);
+    }
   </style>
 </head>
 <body>
+  <!-- Das unsichtbare Eingabefeld -->
   <input id="hidden" class="ghost-input" autocomplete="off" spellcheck="false" />
   
-  <canvas id="work" style="display:none"></canvas> <canvas id="anim"></canvas> <div class="legend">Type to spawn particles. Mouse interaction enabled.</div>
+  <!-- Canvas Layer -->
+  <canvas id="work" style="display:none"></canvas> <!-- Text Analyse -->
+  <canvas id="anim"></canvas> <!-- Physik Render -->
+
+  <div class="legend">Tippen zum Schreiben. Enter zum Zurücksetzen. Maus interaktiv.</div>
+  
   <div class="controls">
-    <label>Friction</label>
-    <input id="fSlider" type="range" min="0.90" max="0.99" step="0.001" value="0.960" />
+    <div class="row">
+      <button id="windBtn">Windstoß (Flussarme) ≋</button>
+    </div>
+    <div class="row">
+      <label>Reibung</label>
+      <input id="fSlider" type="range" min="0.85" max="0.99" step="0.001" value="0.960" />
+    </div>
   </div>
 
   <script>
+    // --- PERLIN NOISE IMPLEMENTIERUNG ---
+    const Noise = (function() {
+      let p = new Uint8Array(512);
+      const permutation = [151,160,137,91,90,15,131,13,201,95,96,53,194,233,7,225,140,36,103,30,69,142,8,99,37,240,21,10,23,190,6,148,247,120,234,75,0,26,197,62,94,252,219,203,117,35,11,32,57,177,33,88,237,149,56,87,174,20,125,136,171,168,68,175,74,165,71,134,139,48,27,166,77,146,158,231,83,111,229,122,60,211,133,230,220,105,92,41,55,46,245,40,244,102,143,54,65,25,63,161,1,216,80,73,209,76,132,187,208,89,18,169,200,196,135,130,116,188,159,86,164,100,109,198,173,186,3,64,52,217,226,250,124,123,5,202,38,147,118,126,255,82,85,212,207,206,59,227,47,16,58,17,182,189,28,42,223,183,170,213,119,248,152,2,44,154,163,70,221,153,101,155,167,43,172,9,129,22,39,253,19,98,108,110,79,113,224,232,178,185,112,104,218,246,97,228,251,34,242,193,238,210,144,12,191,179,162,241,81,51,145,235,249,14,239,107,49,192,214,31,181,199,106,157,184,84,204,176,115,121,50,45,127,4,150,254,138,236,205,93,222,114,67,29,24,72,243,141,128,195,78,66,215,61,156,180];
+      for (let i=0; i < 256 ; i++) p[256+i] = p[i] = permutation[i];
+
+      function fade(t) { return t * t * t * (t * (t * 6 - 15) + 10); }
+      function lerp(t, a, b) { return a + t * (b - a); }
+      function grad(hash, x, y, z) {
+        const h = hash & 15;
+        const u = h<8 ? x : y, v = h<4 ? y : h==12||h==14 ? x : z;
+        return ((h&1) == 0 ? u : -u) + ((h&2) == 0 ? v : -v);
+      }
+
+      return {
+        perlin2: function(x, y) {
+          let X = Math.floor(x) & 255, Y = Math.floor(y) & 255;
+          x -= Math.floor(x); y -= Math.floor(y);
+          let u = fade(x), v = fade(y);
+          let A = p[X]+Y, AA = p[A], AB = p[A+1], B = p[X+1]+Y, BA = p[B], BB = p[B+1];
+          return lerp(v, lerp(u, grad(p[AA], x, y, 0), grad(p[BA], x+1, y, 0)),
+                         lerp(u, grad(p[AB], x, y+1, 0), grad(p[BB], x+1, y+1, 0)));
+        }
+      };
+    })();
+
     // --- KONFIGURATION ---
     const CONFIG = {
-      friction: 0.96,
-      cellSize: 8,      // Größe der ASCII Zellen
-      maxLen: 20,       // Max Input Länge
-      fontSizeBase: 0.6 // Verhältnis Screen/Font
+      friction: 0.96,   
+      cellSize: 8,      
+      maxLen: 20,       
+      fontSizeBase: 0.6,
+      // UPDATE: Skalierung angepasst
+      // X ist klein (lange Wellen)
+      noiseScaleX: 0.003, 
+      // Y verringert: Erzeugt größere/höhere Strukturen vertikal
+      noiseScaleY: 0.015, 
+      noiseSpeed: 0.005 
     };
 
-    // Zeichenvorrat sortiert nach Dichte (ungefähr)
     const CHARSET = " .'`^:,;Il!i><~+_-?][}{1)(|\\/tfjrxnuvczXYUJCLQ0OZmwqpdbkhao*#MW&8%B@$";
 
     // --- DOM ELEMENTE ---
@@ -39,44 +116,43 @@
       hidden: document.getElementById('hidden'),
       anim: document.getElementById('anim'),
       work: document.getElementById('work'),
-      slider: document.getElementById('fSlider')
+      controls: document.querySelector('.controls'),
+      fSlider: document.getElementById('fSlider'),
+      windBtn: document.getElementById('windBtn')
     };
     
     const ctxs = {
-      anim: els.anim.getContext('2d', { alpha: false }), // Alpha false für Performance
-      work: els.work.getContext('2d', { willReadFrequently: true }) // Hint für Browser
+      anim: els.anim.getContext('2d', { alpha: false }), 
+      work: els.work.getContext('2d', { willReadFrequently: true }) 
     };
 
     // --- STATE ---
     let particles = [];
-    let charCache = {}; // Map: Char -> OffscreenCanvas
+    let charCache = {}; 
     let isDragging = false;
     let dragIdx = -1;
-    const mouse = { x: 0, y: 0, r: 50, active: false };
-    
-    // Zufallsgenerator (Xorshift)
-    const seedRandom = (s) => () => {
-      s ^= s << 13; s ^= s >>> 17; s ^= s << 5;
-      return ((s >>> 0) / 4294967296);
-    };
+    let isIntro = true; 
+    let frameCount = 0;
 
-    // --- 1. PRE-RENDERING / CACHING (Performance Boost) ---
+    // Wind State
+    let isWindActive = false;
+    let windStrength = 0;
+    let noiseZ = 0; 
+
+    const mouse = { x: 0, y: 0, r: 50, active: false };
+
+    // --- 1. PRE-RENDERING / CACHING ---
     function updateCharCache(size) {
       charCache = {};
+      if (size < 1) size = 1;
       const font = `${size}px monospace`;
-      
-      // Wir erstellen für jedes Zeichen im Charset ein kleines Bild
       for (let char of CHARSET) {
         const c = document.createElement('canvas');
-        c.width = size;
-        c.height = size;
+        c.width = size; c.height = size;
         const x = c.getContext('2d');
         x.font = font;
         x.textAlign = 'center';
         x.textBaseline = 'middle';
-        
-        // Farbe ist hier weiß, wir färben es später nicht um für max Speed
-        // (Für farbige Partikel müsste man komplexere Shader oder CompositeOps nutzen)
         x.fillStyle = '#e5e7eb'; 
         x.fillText(char, size/2, size/2);
         charCache[char] = c;
@@ -88,76 +164,61 @@
       const W = window.innerWidth;
       const H = window.innerHeight;
       
-      // Resizing der Canvases
+      if (W === 0 || H === 0) return [];
+
       if (els.anim.width !== W || els.anim.height !== H) {
         els.anim.width = els.work.width = W;
         els.anim.height = els.work.height = H;
-        // Cache neu bauen wenn sich Größe ändert
         CONFIG.cellSize = Math.max(6, Math.floor(W / 120)); 
         updateCharCache(CONFIG.cellSize);
       }
 
       const ctx = ctxs.work;
-      const text = els.hidden.value.toUpperCase().slice(0, CONFIG.maxLen);
+      const text = els.hidden.value.slice(0, CONFIG.maxLen);
 
-      // Hintergrund schwarz
       ctx.fillStyle = '#000';
       ctx.fillRect(0, 0, W, H);
 
       if (!text) return [];
 
-      // Text rendern (Groß und fett für Analyse)
       const baseSize = Math.min(W, H) * CONFIG.fontSizeBase;
       ctx.font = `900 ${baseSize}px Arial, sans-serif`;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
       
-      // Skalierung berechnen damit Text passt
       const textWidth = ctx.measureText(text).width;
       const scale = Math.min(1, (W * 0.9) / textWidth);
       ctx.setTransform(scale, 0, 0, scale, W/2, H/2);
       
-      // Text Gradient
       const gradient = ctx.createLinearGradient(-W/2, -H/2, W/2, H/2);
       gradient.addColorStop(0, '#555');
       gradient.addColorStop(0.5, '#fff');
       gradient.addColorStop(1, '#555');
       ctx.fillStyle = gradient;
       ctx.fillText(text, 0, 0);
-      ctx.setTransform(1, 0, 0, 1, 0, 0); // Reset
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
 
-      // Pixel Daten holen
       const idata = ctx.getImageData(0, 0, W, H).data;
       const newParticles = [];
       const cs = CONFIG.cellSize;
       
-      // OPTIMIERUNG: Schrittweite = CellSize (statt jedes Pixel)
       const cols = Math.floor(W / cs);
       const rows = Math.floor(H / cs);
 
       for (let y = 0; y < rows; y++) {
         for (let x = 0; x < cols; x++) {
-          // Sampling in der Mitte der Zelle
           const px = Math.floor((x + 0.5) * cs);
           const py = Math.floor((y + 0.5) * cs);
           const idx = (py * W + px) * 4;
-
           const r = idata[idx];
-          // Nur helle Pixel beachten
+
           if (r > 20) {
-            // Mapping Helligkeit -> Zeichenindex
             const cIdx = Math.floor((r / 255) * (CHARSET.length - 1));
-            const char = CHARSET[cIdx];
-            
-            // Einfache Kollisionsvermeidung durch Grid-Position
             newParticles.push({
-              x: px,
-              y: py,
-              vx: 0,
-              vy: 0,
-              char: char,
-              // ID für Konsistenz (optional)
-              id: x + y * cols 
+              x: px, y: py,
+              vx: 0, vy: 0,
+              char: CHARSET[cIdx],
+              mass: 0.8 + Math.random() * 0.6 
             });
           }
         }
@@ -165,88 +226,159 @@
       return newParticles;
     }
 
-    // --- 3. PHYSIK & RENDER LOOP ---
+    // --- 3. WIND LOGIK ---
+    function triggerWind() {
+      isWindActive = true;
+      windStrength = 1.0; 
+      noiseZ = Math.random() * 100; 
+    }
+
+    // --- 4. PHYSIK LOOP ---
     function loop() {
       const ctx = ctxs.anim;
       const W = els.anim.width;
       const H = els.anim.height;
-      const cs = CONFIG.cellSize;
+      
+      if (W === 0 || H === 0) {
+        requestAnimationFrame(loop);
+        return;
+      }
 
-      // Clear (schnellste Methode ohne Transparenz)
+      const cs = CONFIG.cellSize;
+      frameCount++;
+
       ctx.fillStyle = '#0f0f10';
       ctx.fillRect(0, 0, W, H);
 
-      // Mouse Physics Pre-Calc
+      // --- Wind Update ---
+      if (isWindActive) {
+        // UPDATE: Deutlich schnelleres Abklingen
+        windStrength *= 0.96; 
+        if (windStrength < 0.01) {
+          isWindActive = false;
+          windStrength = 0;
+        }
+        noiseZ += CONFIG.noiseSpeed;
+      }
+
+      // Maus Physik
       const mx = mouse.x;
       const my = mouse.y;
       const mActive = mouse.active;
       const mRadSq = mouse.r * mouse.r;
 
+      // Partikel Loop
       for (let i = 0; i < particles.length; i++) {
         const p = particles[i];
 
-        // 1. Interaktion
+        // 1. GESTRECKTES NOISE FLOW FIELD (Kanal-Effekt)
+        if (isWindActive) {
+           const n = Noise.perlin2(p.x * CONFIG.noiseScaleX, p.y * CONFIG.noiseScaleY + noiseZ);
+           
+           if (n > 0.05) {
+               const streamIntensity = (n - 0.05) * 2.0; 
+               
+               const force = windStrength * streamIntensity * 0.08 / p.mass;
+
+               p.vx += force; 
+               
+               // UPDATE: Vertikales Schlingern verstärkt für mehr "Höhe" der Bewegung
+               p.vy += Math.sin(p.x * 0.02 + frameCount * 0.05) * force * 0.5;
+           }
+        }
+
+        // 2. MAUS INTERAKTION
         if (isDragging && i === dragIdx) {
-          // Dragging: Harte Feder zur Maus
           p.vx += (mx - p.x) * 0.15;
           p.vy += (my - p.y) * 0.15;
         } else if (mActive) {
-          // Pushen
           const dx = p.x - mx;
           const dy = p.y - my;
           const distSq = dx*dx + dy*dy;
           
           if (distSq < mRadSq && distSq > 0) {
             const dist = Math.sqrt(distSq);
-            const force = (mouse.r - dist) / mouse.r; // 0..1
-            const push = force * 25; // Stärke
+            const force = (mouse.r - dist) / mouse.r; 
+            const push = force * 25; 
             p.vx += (dx / dist) * push;
             p.vy += (dy / dist) * push;
           }
         }
 
-        // 2. Integration & Reibung
+        // 3. RICE TABLE PHYSIK
         p.vx *= CONFIG.friction;
         p.vy *= CONFIG.friction;
         p.x += p.vx;
         p.y += p.vy;
 
-        // 3. Wände (Bounce)
+        // Wände (weicher Bounce)
         if (p.x < 0) { p.x = 0; p.vx *= -0.5; }
-        else if (p.x > W - cs) { p.x = W - cs; p.vx *= -0.5; }
-        
+        if (p.x > W - cs) { p.x = W - cs; p.vx *= -0.5; }
         if (p.y < 0) { p.y = 0; p.vy *= -0.5; }
-        else if (p.y > H - cs) { p.y = H - cs; p.vy *= -0.5; }
+        if (p.y > H - cs) { p.y = H - cs; p.vy *= -0.5; }
 
-        // 4. Rendering (Optimiert mit Cache)
+        // --- RENDER ---
         const sprite = charCache[p.char];
         if (sprite) {
-          // Math.floor verhindert Subpixel-Rendering (schärfer + schneller)
-          ctx.drawImage(sprite, Math.floor(p.x), Math.floor(p.y));
+           ctx.drawImage(sprite, Math.floor(p.x), Math.floor(p.y));
         }
       }
-
       requestAnimationFrame(loop);
     }
 
-    // --- EVENTS ---
+    // --- EVENTS & LOGIK ---
+    
     function rebuild() {
+      if (window.innerWidth === 0 || window.innerHeight === 0) return;
       particles = renderTextAndScan();
     }
 
-    els.hidden.addEventListener('input', rebuild);
-    els.slider.addEventListener('input', e => CONFIG.friction = parseFloat(e.target.value));
-    
-    // Maus
-    window.addEventListener('pointermove', e => {
-      mouse.x = e.clientX; mouse.y = e.clientY; mouse.active = true;
+    // Controls Interaktion schützen
+    els.controls.addEventListener('pointerdown', e => e.stopPropagation());
+    els.controls.addEventListener('mousedown', e => e.stopPropagation());
+    els.controls.addEventListener('click', e => e.stopPropagation());
+
+    // Wind Button
+    els.windBtn.addEventListener('click', () => {
+       triggerWind();
+       els.hidden.focus(); 
     });
+
+    els.fSlider.addEventListener('input', e => CONFIG.friction = parseFloat(e.target.value));
+    els.fSlider.addEventListener('change', () => els.hidden.focus());
+
+    // Text Input Logik
+    els.hidden.addEventListener('input', (e) => {
+      if (isIntro) {
+        isIntro = false;
+        const val = els.hidden.value;
+        els.hidden.value = val.replace(/Type/g, ''); 
+      }
+      rebuild();
+    });
+
+    els.hidden.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault(); 
+        els.hidden.value = ''; 
+        isIntro = false; 
+        rebuild(); 
+      }
+    });
+    
+    // Globale Events
+    window.addEventListener('click', (e) => {
+        if (!e.target.closest('.controls')) {
+            els.hidden.focus();
+        }
+    });
+
+    // Maus Logic
+    window.addEventListener('pointermove', e => { mouse.x = e.clientX; mouse.y = e.clientY; mouse.active = true; });
     window.addEventListener('pointerleave', () => { mouse.active = false; isDragging = false; });
     window.addEventListener('pointerup', () => { isDragging = false; dragIdx = -1; });
-    
     window.addEventListener('pointerdown', e => {
       mouse.x = e.clientX; mouse.y = e.clientY; mouse.active = true;
-      // Nächstes Teil finden
       let bestDist = 1000;
       let bestIdx = -1;
       for(let i=0; i<particles.length; i++){
@@ -261,22 +393,16 @@
       }
     });
 
-    window.addEventListener('resize', () => {
-      renderTextAndScan(); // Re-init bei Resize
-      rebuild();
-    });
+    window.addEventListener('resize', () => { renderTextAndScan(); rebuild(); });
 
-    // Init
     window.addEventListener('load', () => {
       els.hidden.focus();
-      els.hidden.value = "ASCII"; // Start Text
+      els.hidden.value = "Type"; 
+      isIntro = true;
       rebuild();
       loop();
     });
     
-    // Fokus behalten
-    window.addEventListener('click', () => els.hidden.focus());
-
   </script>
 </body>
 </html>
